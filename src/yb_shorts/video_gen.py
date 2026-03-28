@@ -22,6 +22,7 @@ def generate_video(video_prompt: str, image_paths: list[Path]) -> Path:
     """
     Generate a video via Google Veo 3.1 using start/end frames as guidance.
 
+    Falls back to prompt-only generation if the frames are rejected by content policy.
     Polls until the operation completes and saves output to output/output.mp4.
     """
     from google import genai
@@ -37,13 +38,12 @@ def generate_video(video_prompt: str, image_paths: list[Path]) -> Path:
     # Identify start and end frames
     start_frame = _find_frame(image_paths, "start_frame")
     end_frame = _find_frame(image_paths, "end_frame")
-
     if not start_frame:
         start_frame = image_paths[0]
     if not end_frame:
         end_frame = image_paths[-1]
 
-    print(f"Generating video with Veo 3.1...")
+    print("Generating video with Veo 3.1...")
     print(f"  Start frame: {start_frame}")
     print(f"  End frame:   {end_frame}")
     print(f"  Prompt:      {video_prompt[:80]}...")
@@ -51,80 +51,97 @@ def generate_video(video_prompt: str, image_paths: list[Path]) -> Path:
     start_image = types.Image.from_file(location=str(start_frame))
     end_image = types.Image.from_file(location=str(end_frame))
 
-    config = types.GenerateVideosConfig(
+    base_config = types.GenerateVideosConfig(
         aspect_ratio="9:16",
         resolution="720p",
         duration_seconds=8,
-        last_frame=end_image,
     )
 
-    # Try models in order until one works
-    operation = None
-    used_model = None
+    # Two attempts: with frames first, then prompt-only fallback
+    attempts = [
+        ("with reference frames", start_image, end_image),
+        ("prompt-only (frame fallback)", None, None),
+    ]
+
+    for attempt_label, s_img, e_img in attempts:
+        config = base_config.model_copy()
+        config.last_frame = e_img
+
+        operation = _submit(client, video_prompt, s_img, config)
+        if operation is None:
+            continue  # no model available
+
+        operation = _poll(client, operation)
+        veo_response = operation.response or operation.result
+
+        if not veo_response:
+            raise RuntimeError("Veo operation completed but returned no response object")
+
+        if veo_response.rai_media_filtered_count:
+            reasons = veo_response.rai_media_filtered_reasons or []
+            print(f"  Veo filtered ({attempt_label}): {reasons}")
+            if attempt_label.startswith("with"):
+                print("  Retrying without reference frames...")
+                continue
+            raise RuntimeError(f"Veo content policy blocked prompt-only generation: {reasons}")
+
+        generated = veo_response.generated_videos or []
+        if not generated:
+            raise RuntimeError("Veo returned an empty generated_videos list")
+
+        return _save_video(client, generated[0])
+
+    raise RuntimeError("Veo generation failed on all attempts")
+
+
+def _submit(client, video_prompt: str, start_image, config):
+    """Try each Veo model in order; return the operation or None if all 404."""
+    from google.genai import types
+
     for model_name in VEO_MODELS:
         try:
             print(f"  Trying model: {model_name}")
-            operation = client.models.generate_videos(
+            op = client.models.generate_videos(
                 model=model_name,
                 prompt=video_prompt,
                 image=start_image,
                 config=config,
             )
-            used_model = model_name
-            print(f"  Using model: {used_model}")
-            break
+            print(f"  Using model: {model_name}")
+            return op
         except Exception as e:
             if "404" in str(e) or "not found" in str(e).lower():
                 print(f"  Model {model_name} not available, trying next...")
                 continue
             raise
+    raise RuntimeError(f"No Veo model available from: {VEO_MODELS}")
 
-    if operation is None:
-        raise RuntimeError(f"No Veo model available from: {VEO_MODELS}")
 
-    # Poll until done
+def _poll(client, operation):
+    """Poll until the operation is done."""
     print("Polling for video completion (this may take 2-4 minutes)...")
     for attempt in range(MAX_POLL_ATTEMPTS):
         if operation.done:
-            break
-        print(f"  [{attempt + 1}/{MAX_POLL_ATTEMPTS}] Still processing... ({(attempt + 1) * POLL_INTERVAL_SECONDS}s elapsed)")
+            return operation
+        elapsed = (attempt + 1) * POLL_INTERVAL_SECONDS
+        print(f"  [{attempt + 1}/{MAX_POLL_ATTEMPTS}] Still processing... ({elapsed}s elapsed)")
         time.sleep(POLL_INTERVAL_SECONDS)
         operation = client.operations.get(operation)
-    else:
-        raise TimeoutError("Veo video generation timed out after 15 minutes")
+    raise TimeoutError("Veo video generation timed out after 15 minutes")
 
-    # Resolve response — Veo may use .response or .result
-    veo_response = operation.response or operation.result
-    if not veo_response:
-        raise RuntimeError("Veo operation completed but returned no response object")
 
-    # Check if content was filtered
-    if veo_response.rai_media_filtered_count:
-        reasons = veo_response.rai_media_filtered_reasons or []
-        raise RuntimeError(
-            f"Veo filtered {veo_response.rai_media_filtered_count} video(s) "
-            f"due to content policy: {reasons}"
-        )
-
-    generated = veo_response.generated_videos or []
-    if not generated:
-        raise RuntimeError("Veo returned an empty generated_videos list")
-
-    # Save the first generated video
-    gen_video = generated[0]
+def _save_video(client, gen_video) -> Path:
+    """Save the first generated video to output/output.mp4."""
     video_obj = gen_video.video
     if not video_obj:
         raise RuntimeError("GeneratedVideo.video is None")
 
     if video_obj.video_bytes:
-        # Bytes already present — write directly
         OUTPUT_VIDEO.write_bytes(video_obj.video_bytes)
     elif video_obj.uri:
-        # Need to download from GCS/signed URL
         video_bytes = client.files.download(file=video_obj)
         OUTPUT_VIDEO.write_bytes(video_bytes)
     else:
-        # Use SDK save helper as fallback
         video_obj.save(str(OUTPUT_VIDEO))
 
     print(f"Video saved to: {OUTPUT_VIDEO}")

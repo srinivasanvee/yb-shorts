@@ -14,19 +14,18 @@ Topic → Brainstorm (3 agents in parallel) → Judge → Script → DALL-E 3 fr
 
 | Agent | Model | Role |
 |-------|-------|------|
-| brainstormer-1 | Claude | Emotional storytelling → 3 ideas |
-| brainstormer-2 | Claude | Surprising facts → 3 ideas |
-| brainstormer-3 | Claude | Trending formats → 3 ideas |
-| judge | Claude | Picks best from 9 ideas |
-| scriptwriter | Claude | Full script + image prompts |
+| brainstormer-1 | gpt-4o-mini | Emotional storytelling → 3 ideas |
+| brainstormer-2 | gpt-4o-mini | Surprising facts → 3 ideas |
+| brainstormer-3 | gpt-4o-mini | Trending formats → 3 ideas |
+| judge | gpt-4o | Picks best from 9 ideas |
+| scriptwriter | gpt-4o | Full script + image prompts |
 
 ---
 
 ## Prerequisites
 
 - Python 3.11+
-- [Claude Code CLI](https://docs.anthropic.com/claude-code) installed and authenticated
-- API keys for Anthropic, OpenAI, and Google
+- API keys for OpenAI and Google
 
 ---
 
@@ -55,8 +54,7 @@ cp .env.example .env
 Edit `.env` and fill in your keys:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...   # Claude Agent SDK — get from console.anthropic.com
-OPENAI_API_KEY=sk-...          # DALL-E 3 — get from platform.openai.com
+OPENAI_API_KEY=sk-...          # OpenAI Agents SDK + DALL-E 3 — get from platform.openai.com
 GOOGLE_API_KEY=AIza...         # Veo 3.1 — get from aistudio.google.com
 SHORTS_TOPIC=surprising science facts  # Optional default topic
 ```
@@ -129,9 +127,6 @@ yb-shorts/
 
 **`ModuleNotFoundError: No module named 'claude_agent_sdk'`**
 Install dependencies: `pip install -e .`
-
-**`CLINotFoundError`**
-Claude Code CLI is not installed or not in PATH. Install it and run `claude` once to authenticate.
 
 **Veo model 404 error**
 The code automatically tries fallback model names. If all fail, verify your Google API key has Veo access at [aistudio.google.com](https://aistudio.google.com).

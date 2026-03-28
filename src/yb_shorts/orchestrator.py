@@ -1,53 +1,63 @@
-"""Orchestrator: runs the multi-agent pipeline via Claude Agent SDK."""
+"""Orchestrator: runs the multi-agent pipeline via OpenAI Agents SDK."""
 
+import asyncio
 import json
+import os
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from agents import Runner, set_default_openai_key
 
-from .agents import AGENT_DEFINITIONS, ORCHESTRATOR_SYSTEM_PROMPT
+from .agents import brainstormer_1, brainstormer_2, brainstormer_3, judge, scriptwriter
 from .models import Script
-from .utils import extract_json
+
+
+def _init_openai() -> None:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable not set")
+    set_default_openai_key(api_key)
 
 
 async def run_orchestration(topic: str) -> Script:
     """
     Run the full multi-agent brainstorm → judge → script pipeline.
 
-    Calls brainstormers in parallel, judges all ideas, writes the script,
-    and returns a validated Script model.
+    Brainstormers run in parallel via asyncio.gather.
+    Returns a validated Script Pydantic model.
     """
-    prompt = (
-        f"Create a viral YouTube Short about this topic: {topic}\n\n"
-        f"Follow your instructions: call brainstormer-1, brainstormer-2, and "
-        f"brainstormer-3 SIMULTANEOUSLY, then judge, then scriptwriter."
+    _init_openai()
+
+    # Phase 1: All three brainstormers in parallel
+    print("  Running brainstormers in parallel...")
+    b1, b2, b3 = await asyncio.gather(
+        Runner.run(brainstormer_1, topic),
+        Runner.run(brainstormer_2, topic),
+        Runner.run(brainstormer_3, topic),
     )
 
-    result_text: str | None = None
+    all_ideas = (
+        b1.final_output.ideas
+        + b2.final_output.ideas
+        + b3.final_output.ideas
+    )
+    print(f"  Got {len(all_ideas)} ideas total ({len(b1.final_output.ideas)} + "
+          f"{len(b2.final_output.ideas)} + {len(b3.final_output.ideas)})")
 
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            allowed_tools=["Agent"],
-            agents=AGENT_DEFINITIONS,
-            system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
-            model="claude-opus-4-6",
-            max_turns=20,
-        ),
-    ):
-        if isinstance(message, ResultMessage):
-            result_text = message.result
+    # Phase 2: Judge picks the winner
+    print("  Judge selecting best idea...")
+    ideas_json = json.dumps([idea.model_dump() for idea in all_ideas], indent=2)
+    judge_result = await Runner.run(
+        judge,
+        f"Here are 9 YouTube Shorts ideas. Pick the single best one:\n\n{ideas_json}",
+    )
+    verdict = judge_result.final_output
+    print(f"  Winner: {verdict.winning_idea.title}")
 
-    if not result_text:
-        raise RuntimeError("Orchestrator returned no result")
+    # Phase 3: Scriptwriter produces the full script
+    print("  Scriptwriter creating full script...")
+    script_result = await Runner.run(
+        scriptwriter,
+        f"Create a full YouTube Shorts script for this winning idea:\n\n"
+        f"{verdict.winning_idea.model_dump_json(indent=2)}",
+    )
 
-    raw = extract_json(result_text)
-    return Script.model_validate(raw)
-
-
-def format_ideas_for_judge(brainstorm_results: list[dict]) -> str:
-    """Format multiple brainstorm results into a single JSON string for the judge."""
-    all_ideas = []
-    for result in brainstorm_results:
-        ideas = result.get("ideas", [])
-        all_ideas.extend(ideas)
-    return json.dumps({"all_ideas": all_ideas}, indent=2)
+    return script_result.final_output
