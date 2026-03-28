@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 async def main() -> None:
     load_dotenv()
 
-    topic = os.getenv("SHORTS_TOPIC", "surprising science facts")
+    topic = os.getenv("SHORTS_TOPIC", "Lord Shiva grace towards his young happy meditating woman devotee").strip()
     if len(sys.argv) > 1:
-        topic = " ".join(sys.argv[1:])
+        topic = " ".join(sys.argv[1:]).strip()
 
     print("=" * 60)
     print("YB-Shorts: YouTube Viral Shorts Generator")
@@ -28,33 +28,51 @@ async def main() -> None:
     script = await run_orchestration(topic)
     print()
     print("Script generated:")
-    print(f"  Title:    {script.title}")
-    print(f"  Hook:     {script.hook}")
-    print(f"  Duration: {script.duration_seconds}s")
-    print(f"  Frames:   {len(script.image_prompts)}")
+    print(f"  Title:      {script.title}")
+    print(f"  Hook:       {script.hook}")
+    print(f"  Narration:  {script.narration}")
+    print(f"  Duration:   {script.duration_seconds}s")
+    print(f"  Video prompt: {script.video_prompt}")
+    print(f"  Character:  {script.character}")
     print()
 
-    # --- Phase 2: Image generation (DALL-E 3, parallel) ---
-    print("Phase 2: Generating frames with DALL-E 3...")
-    from src.yb_shorts.image_gen import generate_all_images
+    # --- Resolve ingredient images ---
+    # For _devotee characters: ingredient_1 = deity, ingredient_2 = devotee.
+    # For deity-only characters: both ingredients are the deity image.
+    RESOURCES_DIR = Path(__file__).parent / "resources"
+    character = script.character
+    if character.endswith("_devotee"):
+        deity = character.replace("_devotee", "")
+        ingredient_1 = RESOURCES_DIR / f"{deity}.png"
+        ingredient_2 = RESOURCES_DIR / f"{character}.png"
+    else:
+        ingredient_1 = RESOURCES_DIR / f"{character}.png"
+        ingredient_2 = ingredient_1
 
-    image_paths = await generate_all_images(script.image_prompts)
+    for img_path in {ingredient_1, ingredient_2}:
+        if not img_path.exists():
+            raise FileNotFoundError(
+                f"Character image not found: {img_path}\n"
+                f"Place a PNG for '{img_path.stem}' in the resources/ folder."
+            )
+
+    print(f"  Ingredients: {ingredient_1.stem} + {ingredient_2.stem}")
     print()
 
-    # --- Phase 3: Video generation (Veo 3.1) ---
-    print("Phase 3: Generating video with Veo 3.1...")
+    # --- Phase 2: Video generation (Veo 3.1) ---
+    print("Phase 2: Generating video with Veo 3.1...")
     from src.yb_shorts.video_gen import generate_video
 
-    output_path = generate_video(script.video_prompt, image_paths)
+    output_path = generate_video(script.video_prompt, ingredient_1, ingredient_2)
     print()
 
     print("=" * 60)
     print(f"Done! Video saved to: {output_path}")
     print("=" * 60)
     print()
-    print("Script details:")
-    print(f"  Title:     {script.title}")
-    print(f"  Narration: {script.narration[:100]}...")
+    print(f"Topic:  {topic}")
+    print(f"Title:  {script.title}")
+    print(f"Output: {output_path}")
 
 
 if __name__ == "__main__":
